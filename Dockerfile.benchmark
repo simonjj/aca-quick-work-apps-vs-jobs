@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1
+
+# ---------------------------------------------------------------------------
+# Benchmark / ACR-build variant of the Dockerfile.
+#
+# Identical to ./Dockerfile but WITHOUT the `--platform=$BUILDPLATFORM` cross-build
+# directives. ACR Tasks (`az acr build`) run on native amd64 agents, so cross-compile
+# is unnecessary, and the classic ACR dependency scanner cannot parse the
+# `--platform=$BUILDPLATFORM` syntax. Use this file to build the heavy (3 GB) image
+# directly in ACR — only the tiny source context is uploaded; the multi-GB padding is
+# generated server-side, avoiding slow/flaky local pushes of a 3 GB layer.
+#
+#   az acr build -r <acr> -t <repo>:bench3gb --platform linux/amd64 \
+#       --build-arg IMAGE_PADDING_GB=3 -f Dockerfile.benchmark .
+# ---------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+
+COPY src/Worker/Worker.csproj src/Worker/
+RUN dotnet restore src/Worker/Worker.csproj
+
+COPY src/Worker/ src/Worker/
+RUN dotnet publish src/Worker/Worker.csproj -c Release -o /app/publish /p:UseAppHost=false
+
+# ---------------------------------------------------------------------------
+# Padding stage. Bytes come from /dev/urandom: incompressible, so they add real
+# on-disk/registry bytes (and real pull time) rather than compressing away. The
+# content is random (not reproducible) but its SIZE is deterministic — which is
+# all the cold-start benchmark needs.
+# ---------------------------------------------------------------------------
+FROM busybox:1.36 AS padding
+ARG IMAGE_PADDING_GB=0
+RUN if [ "${IMAGE_PADDING_GB}" != "0" ]; then \
+        echo "Generating ${IMAGE_PADDING_GB} GB of incompressible padding..."; \
+        head -c $(( ${IMAGE_PADDING_GB} * 1024 * 1024 * 1024 )) /dev/urandom > /padding.bin; \
+        ls -lh /padding.bin; \
+    else \
+        echo "No padding (lightweight image)."; \
+        : > /padding.bin; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Runtime stage (amd64 target for ACA)
+# ---------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/runtime:8.0 AS final
+WORKDIR /app
+
+# The padding lands as its own layer via COPY so it adds real registry/pull bytes.
+COPY --from=padding /padding.bin /app/padding.bin
+
+COPY --from=build /app/publish .
+
+ENV DOTNET_TieredPGO=1
+ENTRYPOINT ["dotnet", "Worker.dll"]

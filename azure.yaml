@@ -1,0 +1,47 @@
+# azd (Azure Developer CLI) configuration.
+# Deploy everything with:  azd up
+# Tear everything down with: azd down --purge
+#
+# See README.md for prerequisites and step-by-step instructions.
+name: aca-quick-work-apps-vs-jobs
+metadata:
+  template: aca-quick-work-apps-vs-jobs@1.0.0
+
+infra:
+  provider: bicep
+  path: infra
+  module: main
+
+services:
+  worker:
+    # Background queue worker. azd builds the image from the root Dockerfile, pushes it to the
+    # provisioned ACR, and deploys it to whichever resource is tagged `azd-service-name: worker`
+    # — a Container App (deploymentMode=app) or a Container Apps Job (deploymentMode=jobs). azd
+    # detects the resource type automatically and calls the right API.
+    project: .
+    host: containerapp
+    language: docker
+    docker:
+      path: ./Dockerfile
+      context: .
+      # ACA runs x86/amd64 only. Force amd64 so images built on ARM (e.g. Apple Silicon /
+      # Windows on ARM) still run on Container Apps. The Dockerfile cross-compiles the .NET app
+      # natively on the build host (BUILDPLATFORM) so this stays fast on ARM — no QEMU emulation
+      # of the build, only the amd64 runtime layers are assembled.
+      platform: linux/amd64
+      # ~3 GB incompressible padding reproduces the customer's real image size (the reason they
+      # chose Apps over Jobs: a 3 GB pull would blow past their 30s cold-start tolerance).
+      # Override per environment: `azd env set IMAGE_PADDING_GB 0` for fast iteration.
+      buildArgs:
+        - IMAGE_PADDING_GB=${IMAGE_PADDING_GB=3}
+
+# Postdeploy hook: for DEPLOYMENT_MODE=warmjob, refresh the warm floor so it runs the real worker
+# image instead of the provision-time placeholder (see scripts/refresh-warm-floor.ps1 and the
+# "Deployment caveat" in docs/benchmark-results.md). No-op for app/jobs modes. Best-effort —
+# continueOnError keeps it from ever blocking `azd up`.
+hooks:
+  postdeploy:
+    shell: pwsh
+    run: ./scripts/refresh-warm-floor.ps1
+    continueOnError: true
+    interactive: false

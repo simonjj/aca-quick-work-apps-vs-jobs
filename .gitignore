@@ -1,0 +1,23 @@
+# .NET build output
+**/bin/
+**/obj/
+*.user
+
+# azd / Azure
+.azure/
+
+# Generated Bicep ARM JSON
+infra/main.json
+
+# IDE
+.vs/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env / secrets
+*.local.json
+.env
