@@ -6,9 +6,9 @@ head-to-head:
 
 | Mode | What it is | Cold-start cost | Mid-job scale-in safety |
 | --- | --- | --- | --- |
-| **`app`** | Long-running Container App, KEDA queue scaler, warm `min=2` replicas | **1–3 s** on a warm replica; ~50 s only when bursting onto a cold node | ❌ replicas can be killed mid-job on scale-in |
-| **`jobs`** | Event-driven Container Apps **Job** (one execution per message) | **~92 s** on **every** execution (always cold) | ✅ an execution is never scaled-in while running |
-| **`warmjob`** | Container Apps Job with a warm `minExecutions=2` floor + drain-aware worker | **1.8–4.2 s** on the warm floor; ~47 s only when bursting onto a cold node | ✅ run-to-completion *and* warm pickup |
+| **`app`** | Long-running Container App, KEDA queue scaler, warm `min=2` replicas | **1–3 s** on a warm replica; ~50 s image pull when bursting onto a cold node (end-to-end longer under queue-wait, ~168 s observed) | ❌ replicas can be killed mid-job on scale-in |
+| **`jobs`** | Event-driven Container Apps **Job** (one execution per message) | **~92 s** end-to-end on **every** execution (always cold) | ✅ an execution is never scaled-in while running |
+| **`warmjob`** | Container Apps Job with a warm `minExecutions=2` floor + drain-aware worker | **1.8–4.2 s** on the warm floor; ~47 s image pull when bursting onto a cold node (up to ~120–162 s under capacity pressure) | ✅ run-to-completion *and* warm pickup |
 
 It deploys end-to-end with a single `azd up`, is self-contained (no internal dependencies, secrets,
 or hard-coded subscriptions), and is the basis for the benchmark in
@@ -160,6 +160,9 @@ work is never silently lost — it reappears on the queue and the durable table 
 
 ## Repository structure
 
+Key files (the `.NET` projects also carry their standard `.csproj`, `Program.cs`,
+`appsettings.json`, and `Models/`/`Services/` sources):
+
 ```
 .
 ├── azure.yaml                  # azd service + infra definition (azd up / azd down)
@@ -167,9 +170,10 @@ work is never silently lost — it reappears on the queue and the durable table 
 ├── Dockerfile.benchmark        # amd64-native variant for `az acr build` (server-side 3 GB image)
 ├── LICENSE                     # Apache License 2.0
 ├── README.md
+├── .gitignore  .dockerignore
 ├── infra/                      # Bicep (azd-wired)
 │   ├── main.bicep              # subscription-scope entry: RG + resources + deploymentMode param
-│   ├── main.parameters.json    # azd-bound parameters (DEPLOYMENT_MODE, IMAGE_PADDING_GB, drain knobs)
+│   ├── main.parameters.json    # azd-bound parameters (DEPLOYMENT_MODE, drain knobs, scaling)
 │   └── resources.bicep         # storage, ACR, identity, Log Analytics, ACA env + App / Job
 ├── src/
 │   ├── Worker/                 # .NET 8 queue worker (AcaQueueRepro.Worker)
@@ -177,7 +181,7 @@ work is never silently lost — it reappears on the queue and the durable table 
 │   │   ├── Program.cs          # generic Host + AddHostedService<Worker>
 │   │   ├── Models/             # WorkerOptions, JobPayload, JobState, JobStateRecord
 │   │   └── Services/           # JobStateStore (Azure Table durable state)
-│   └── Enqueuer/               # .NET 8 CLI to enqueue job batches onto the queue
+│   └── Enqueuer/               # .NET 8 CLI (Program.cs) to enqueue job batches onto the queue
 ├── scripts/                    # PowerShell helpers
 │   ├── enqueue.ps1             # push job batches ("NxS" = N jobs of S seconds)
 │   ├── run-repro.ps1           # apply a scaling profile and re-provision
@@ -198,12 +202,16 @@ work is never silently lost — it reappears on the queue and the durable table 
 
 ## Tuning knobs
 
-Set via `azd env set <NAME> <value>` before `azd up` (defaults in `infra/main.parameters.json`):
+Set via `azd env set <NAME> <value>` before `azd up`. The most common knobs are below; the full set
+of parameters (scaling: `MIN_REPLICAS`, `MAX_REPLICAS`, `QUEUE_LENGTH`, `POLLING_INTERVAL`,
+`REPLICA_TIMEOUT`, `JOB_MAX_EXECUTIONS`, `WARM_JOB_MIN_EXECUTIONS`, …) lives in
+`infra/main.parameters.json`. `IMAGE_PADDING_GB` is the exception — its default (`3`) is the build
+arg in `azure.yaml`.
 
 | Env var | Default | Applies to | Purpose |
 | --- | --- | --- | --- |
 | `DEPLOYMENT_MODE` | `app` | all | `app` \| `jobs` \| `warmjob` |
-| `IMAGE_PADDING_GB` | `3` | all | image size padding (`0` = fast lite build) |
+| `IMAGE_PADDING_GB` | `3` | all | image size padding (`0` = fast lite build); set in `azure.yaml` |
 | `DRAIN_SAFETY_MARGIN_SECONDS` | `300` | warmjob | how long before `replicaTimeout` the worker stops taking new work and drains; must exceed worst-case cold-start drift |
 | `DRAIN_STAGGER_SECONDS` | `60` | warmjob | spread floor rollovers so they don't all roll at once |
 

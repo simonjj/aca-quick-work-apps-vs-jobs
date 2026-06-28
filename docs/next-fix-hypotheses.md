@@ -1,8 +1,8 @@
 # Next: mitigation hypotheses
 
-**Out of scope for this repository.** Per `instructions.md` §7, this repo only *proves or
-disproves* the scale-down-loses-work failure. Do **not** implement these here. They are recorded
-as candidates for follow-up work once the failure is reproduced.
+**Out of scope for this repository.** This repo only *demonstrates* the scale-down-loses-work
+failure (and the `warmjob` mode that avoids it). The ideas below are **not** implemented here; they
+are recorded as candidates for follow-up work.
 
 ## Candidate mitigations
 

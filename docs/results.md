@@ -1,7 +1,7 @@
 # Results
 
-Record the conclusion of the reproduction here once you have run it. This file maps directly to
-the success criteria in `instructions.md` §8.
+Record the conclusion of the reproduction here once you have run it (started-but-never-completed
+jobs correlated with a scale-in / termination event).
 
 ## Outcome
 

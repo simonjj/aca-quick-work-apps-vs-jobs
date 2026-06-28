@@ -16,9 +16,9 @@ mode for the warm Job — padded to the customer's real image size.
 | Work simulated | 180 s per message |
 | Telemetry | Azure Monitor / Log Analytics — `ContainerAppSystemLogs_CL` (kubelet phase events) + `ContainerAppConsoleLogs_CL` (worker logs) |
 
-> The internal ACA regional Kusto cluster (`cappsswec.swedencentral`) was unreachable from the
-> author's network (corpnet/VPN-gated), so all platform timing was taken from the per-environment
-> Log Analytics workspaces, which carry the same kubelet phase events (`AssigningReplica`,
+> The regional ACA Kusto cluster was not reachable from the test network, so all platform timing
+> was taken from the per-environment Log Analytics workspaces, which carry the same kubelet phase
+> events (`AssigningReplica`,
 > `PullingImage`, `ImagePulled`, `ContainerCreated`, `ContainerStarted`, `ContainerAppReady`).
 > The `ImagePulled` message itself reports the exact pull duration, so the headline pull number
 > is kubelet-authoritative (no log-ingestion jitter).
@@ -196,7 +196,7 @@ azd up -e warmjob
 
 # Build the real 3 GB image server-side in ACR (avoids a slow/flaky 3 GB local push),
 # then point the resource at it:
-az acr build -r <acr> -t aca-queue-scaledown-repro/worker:bench3gb \
+az acr build -r <acr> -t aca-quick-work-apps-vs-jobs/worker:bench3gb \
     --platform linux/amd64 --build-arg IMAGE_PADDING_GB=3 -f Dockerfile.benchmark .
 az containerapp     update -g apps-as-jobs-APPS -n <app> --image <acr>/…:bench3gb   # App
 az containerapp job update -g apps-as-jobs-JOBS -n <job> --image <acr>/…:bench3gb   # Job

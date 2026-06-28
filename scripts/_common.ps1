@@ -6,7 +6,7 @@
 function Get-AzdEnv {
     <#
         Returns a hashtable of the current azd environment's values (outputs + config),
-        e.g. STORAGE_ACCOUNT_NAME, AZURE_RESOURCE_GROUP, WORKER_CONTAINER_APP_NAME.
+        e.g. STORAGE_ACCOUNT_NAME, AZURE_RESOURCE_GROUP, WORKER_RESOURCE_NAME.
     #>
     if (-not (Get-Command azd -ErrorAction SilentlyContinue)) {
         throw "azd (Azure Developer CLI) is not installed or not on PATH."

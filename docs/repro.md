@@ -61,7 +61,7 @@ Watch replica counts while it runs:
 
 ```pwsh
 $rg = (azd env get-values | Select-String AZURE_RESOURCE_GROUP).ToString().Split('=')[1].Trim('"')
-$app = (azd env get-values | Select-String WORKER_CONTAINER_APP_NAME).ToString().Split('=')[1].Trim('"')
+$app = (azd env get-values | Select-String WORKER_RESOURCE_NAME).ToString().Split('=')[1].Trim('"')
 az containerapp replica list -g $rg -n $app -o table
 ```
 
