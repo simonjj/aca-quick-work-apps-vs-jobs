@@ -1,9 +1,10 @@
 # Benchmark: App-replicas-as-queue-workers vs. ACA Jobs (≈3 GB image)
 
-Cold-start phase timing for the three deployment options of this template, measured on a real
-deployment in **Sweden Central** with the customer-aligned configuration. The same worker image is
-used for all three — run in `loop` mode for the App, `once` mode for the event Job, and `drain`
-mode for the warm Job — padded to the customer's real image size.
+Cold-start phase timing for the deployment options of this template, measured on a real
+deployment in **Sweden Central** with the customer-aligned configuration (the `flexjob` lane was
+measured separately in **South Central US** — see its section below). The same worker image is
+used for all — run in `loop` mode for the App, `once` mode for the event Job and Flex Job, and
+`drain` mode for the warm Job — padded to the customer's real image size.
 
 | | |
 |---|---|
@@ -40,6 +41,8 @@ warm replicas and warm nodes:
 | **Warm-Job — pickup on the warm `minExecutions=2` floor** | **1.8–4.2 seconds** (real worker already polling, image cached on-node) |
 | Warm-Job — burst above the floor, **warm node** (image cached) | 2–5 s (≈0.1 s pull) |
 | Warm-Job — burst above the floor, **cold node** (full 3 GB pull) | ~46–49 s (47.5 s pull); up to ~120–162 s under capacity pressure |
+| **Flex-Job — first execution on a cold Flex node** (full 3 GB pull) | **~85 s** (~52 s pull) |
+| **Flex-Job — execution on a warm Flex node** (image cached) | **~18 seconds** (0.1 s pull; Flex nodes never scale to zero, so the image persists) |
 
 ¹ Includes queue-wait behind the pre-warmed replicas, which had already drained the early messages.
 
@@ -170,6 +173,59 @@ until `replicaTimeout` rollover.
 
 ---
 
+## Flex-Job lane (`flexjob` mode)
+
+The `flexjob` deployment mode is the **same** event-driven ACA **Job** as the `jobs` lane (`once`
+worker, one execution per message, `minExecutions=0` so it scales from zero) — the only difference
+is that it runs on a **Flex workload profile** instead of the default Consumption pool. Flex
+profiles are single-tenant and **do not scale their node pool to zero**, so once a node has pulled
+the ~3 GB image it stays warm and the image remains cached on-node.
+
+Measured on `apps-as-jobs-FLEXJOB` (**southcentralus**, sub `Private Test Sub ACAPMS`), Job
+`cj-worker-…` on `workloadProfileName=flex` (`workloadProfileType: Flex`, 0.5 CPU / 2 GiB — Flex
+requires fixed CPU/memory combos, so the template snaps the default `0.5/1Gi` to `0.5/2Gi`), same
+3.30 GB image (`3,303,756,238 bytes`), `queueLength=1`, `pollingInterval=30s`.
+
+> **Region caveat.** This lane was measured in **South Central US**, while the App/Jobs/Warm-Job
+> lanes were measured in Sweden Central. Cold-pull time is region/ACR-dependent, so treat the
+> cross-lane comparison as directional. The **within-lane** cold-vs-warm delta below is
+> same-region, same-ACR, same-image and is the meaningful result.
+
+Two bursts were driven at the same Flex Job, back-to-back:
+
+| Scenario | message → worker processing | 3 GB pull (kubelet) |
+|---|---|---|
+| **Burst 1 — cold Flex nodes** (first pull), 6 executions | **84–87 s** | 50.9, 51.5, 52.4, 53.0, 53.4, 53.7 s (**avg ~52.5 s**) |
+| **Burst 2 — warm Flex nodes** (image cached), 6 executions ~2 min later | **~18 s** (17.9–18.1 s) | 113, 116, 117, 140, 140, 142 **ms** ("already present") |
+
+**Three findings that matter:**
+
+1. **The first pull is fully cold — identical to the plain `jobs` lane.** On a freshly-provisioned
+   Flex node the 3 GB image pulls in ~52 s, and end-to-end pickup is ~85 s. Flex gives **no**
+   cold-start advantage on the very first execution per node.
+
+2. **Flex converts the per-execution pull into a one-time warm-up.** Because Flex nodes don't scale
+   to zero, the node and its cached image persist between bursts. The second burst — landing on the
+   now-warm nodes — pulled in **~0.1 s** and picked up work in **~18 s**. So unlike the Consumption
+   `jobs` lane (where each execution tends to get a fresh pod on a cold node and pays the full ~52 s
+   pull *every* time), Flex pays the pull **once** and every later execution skips it.
+
+3. **Flex is not an App-style warm floor.** The residual **~18 s** warm pickup is KEDA polling +
+   pod scheduling + the init `metadata-check` container + .NET init — **not** image pull. A fresh
+   pod is still scheduled per message; there is no always-running replica already polling the queue.
+   So Flex removes the **image-pull** portion of cold start (~52 s → ~0.1 s) but keeps the
+   **pod-scheduling** portion. It lands *between* the plain Job (~92 s every time) and the
+   App/Warm-Job warm floor (1.8–4.2 s), while retaining the Job's run-to-completion guarantee (a
+   running execution is never scaled-in mid-work).
+
+**When to reach for `flexjob`:** steady or recurring queue load where you want the Job
+run-to-completion guarantee and can tolerate ~18 s pickup, and where a persistent (never-scale-to-
+zero) node pool is acceptable — it removes the repeated 3 GB pull tax without the drain-mode
+complexity of `warmjob`. For the lowest possible pickup on bursty, latency-sensitive work, the App
+or Warm-Job floor is still faster.
+
+---
+
 ## How to reproduce
 
 ```pwsh
@@ -194,12 +250,24 @@ azd up -e warmjob
 # IMPORTANT: after the real 3 GB image is live, stop the placeholder floor executions so the
 # warm floor respawns on the real worker image (see "Deployment caveat" above).
 
+# Flex-Job variant (same event Job, scheduled on a Flex workload profile).
+# Flex is region-specific; confirm availability first:
+#   az containerapp env workload-profile list-supported --location southcentralus -o table
+azd env new flexjob --location southcentralus
+azd env set DEPLOYMENT_MODE flexjob          -e flexjob
+azd env set AZURE_RESOURCE_GROUP_NAME apps-as-jobs-FLEXJOB -e flexjob
+azd up -e flexjob
+# The Flex cold-vs-warm effect shows across two back-to-back bursts: the first pays the ~52 s pull
+# on cold nodes; the second (nodes now warm, image cached) pulls in ~0.1 s. Flex nodes do not scale
+# to zero, so the image persists between bursts.
+
 # Build the real 3 GB image server-side in ACR (avoids a slow/flaky 3 GB local push),
 # then point the resource at it:
 az acr build -r <acr> -t aca-quick-work-apps-vs-jobs/worker:bench3gb \
     --platform linux/amd64 --build-arg IMAGE_PADDING_GB=3 -f Dockerfile.benchmark .
 az containerapp     update -g apps-as-jobs-APPS -n <app> --image <acr>/…:bench3gb   # App
 az containerapp job update -g apps-as-jobs-JOBS -n <job> --image <acr>/…:bench3gb   # Job
+az containerapp job update -g apps-as-jobs-FLEXJOB -n <job> --image <acr>/…:bench3gb # Flex Job
 
 # Drive load, then harvest phase timings from Log Analytics:
 dotnet run --project src/Enqueuer -- --connection <cs> --queue jobs --batch "18x180"

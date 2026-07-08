@@ -2,13 +2,19 @@
 // All resources for the ACA queue-worker repro / App-vs-Jobs benchmark.
 // Deployed at resource-group scope by main.bicep.
 //
-// deploymentMode selects ONE of three equivalent workloads that read the same queue with the
+// deploymentMode selects ONE of four equivalent workloads that read the same queue with the
 // same KEDA azure-queue scaler, so their cold-start behaviour can be compared apples-to-apples:
 //   'app'     -> Microsoft.App/containerApps : long-running replicas (the customer's model)
 //   'jobs'    -> Microsoft.App/jobs          : event-driven run-to-completion executions (cold each)
 //   'warmjob' -> Microsoft.App/jobs          : event-driven Job kept warm via minExecutions with a
 //                                              drain-before-deadline worker — App-like warm pickup
 //                                              plus the Job run-to-completion guarantee.
+//   'flexjob' -> Microsoft.App/jobs          : plain event-driven Job (cold each, like 'jobs') but
+//                                              scheduled on a Flex workload profile instead of the
+//                                              Consumption pool. Flex is single-tenant and does not
+//                                              scale its nodes to zero, so nodes stay warm and the
+//                                              ~3 GB image can remain cached on-node — the benchmark
+//                                              measures whether that removes the per-execution pull.
 //        TRADEOFF: a drain execution does not idle-exit, and KEDA never scales a *running*
 //        execution down. So after a burst the running-execution count ratchets toward
 //        jobMaxExecutions and only returns to the warmJobMinExecutions floor as each execution
@@ -26,8 +32,9 @@
   'app'
   'jobs'
   'warmjob'
+  'flexjob'
 ])
-@description('Which workload to deploy: long-running Container App (app), event-driven Container Apps Job (jobs), or warm event-driven Job (warmjob).')
+@description('Which workload to deploy: long-running Container App (app), event-driven Container Apps Job (jobs), warm event-driven Job (warmjob), or event-driven Job on a Flex workload profile (flexjob).')
 param deploymentMode string = 'app'
 
 param location string
@@ -89,17 +96,31 @@ param progressIntervalSeconds int = 30
 @description('Placeholder image used until azd pushes the real worker image.')
 param placeholderImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 
+@description('Workload profile type for flexjob mode. Deployed as a named profile on the managed environment and referenced by the Job. Default Flex.')
+param flexWorkloadProfileType string = 'Flex'
+
 var isApp = deploymentMode == 'app'
 var isWarmJob = deploymentMode == 'warmjob'
-// Both 'jobs' and 'warmjob' deploy the Microsoft.App/jobs resource.
-var isJob = deploymentMode == 'jobs' || isWarmJob
+var isFlexJob = deploymentMode == 'flexjob'
+// 'jobs', 'warmjob' and 'flexjob' all deploy the Microsoft.App/jobs resource.
+var isJob = deploymentMode == 'jobs' || isWarmJob || isFlexJob
 
-// App => loop forever (long-running replica); jobs => process one message and exit;
+// App => loop forever (long-running replica); jobs/flexjob => process one message and exit;
 // warmjob => poll forever (warm pickup) but drain & exit before replicaTimeout for safe rollover.
 var runMode = isApp ? 'loop' : (isWarmJob ? 'drain' : 'once')
 
-// Warm Job keeps a floor of always-running executions; plain Job scales from zero.
+// Warm Job keeps a floor of always-running executions; plain Job (incl. flexjob) scales from zero.
 var effectiveJobMinExecutions = isWarmJob ? warmJobMinExecutions : jobMinExecutions
+
+// flexjob schedules the Job on a named Flex workload profile; all other modes use the default
+// Consumption pool (no workload profiles on the environment, workloadProfileName unset).
+var flexProfileName = 'flex'
+
+// Flex profiles only accept fixed CPU/memory combos (0.25/1Gi, 0.5/2Gi, 1/4Gi, ...). The template
+// default 0.5 CPU pairs with 1Gi on Consumption but must be 2Gi on Flex, so snap the default memory
+// up for flexjob to keep `azd up` working out of the box. Memory does not affect image-pull timing,
+// so the cold-start benchmark stays comparable. Non-flex modes keep the requested memory.
+var effectiveWorkerMemory = (isFlexJob && workerMemory == '1Gi') ? '2Gi' : workerMemory
 
 var abbrs = {
   storageAccount: 'st'
@@ -196,11 +217,24 @@ resource stateTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023
 var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storage.listKeys().keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
 
 // ---- Container Apps environment -----------------------------------------------------
-resource containerAppsEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
+// flexjob needs a workload-profiles-enabled environment carrying the default Consumption pool
+// plus a named Flex profile; all other modes use a plain (Consumption-only) environment.
+var flexWorkloadProfiles = [
+  {
+    name: 'Consumption'
+    workloadProfileType: 'Consumption'
+  }
+  {
+    name: flexProfileName
+    workloadProfileType: flexWorkloadProfileType
+  }
+]
+
+resource containerAppsEnv 'Microsoft.App/managedEnvironments@2025-02-02-preview' = {
   name: '${abbrs.containerAppsEnv}-${resourceToken}'
   location: location
   tags: tags
-  properties: {
+  properties: union({
     appLogsConfiguration: {
       destination: 'log-analytics'
       logAnalyticsConfiguration: {
@@ -208,7 +242,7 @@ resource containerAppsEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
         sharedKey: logAnalytics.listKeys().primarySharedKey
       }
     }
-  }
+  }, isFlexJob ? { workloadProfiles: flexWorkloadProfiles } : {})
 }
 
 // Shared container env. RunMode flips the same image between long-running and run-once behaviour.
@@ -296,7 +330,7 @@ resource workerApp 'Microsoft.App/containerApps@2025-02-02-preview' = if (isApp)
           image: placeholderImage
           resources: {
             cpu: json(workerCpu)
-            memory: workerMemory
+            memory: effectiveWorkerMemory
           }
           env: workerEnv
         }
@@ -346,6 +380,7 @@ resource workerJob 'Microsoft.App/jobs@2025-02-02-preview' = if (isJob) {
   }
   properties: {
     environmentId: containerAppsEnv.id
+    workloadProfileName: isFlexJob ? flexProfileName : null
     configuration: {
       triggerType: 'Event'
       replicaTimeout: replicaTimeout
@@ -387,7 +422,7 @@ resource workerJob 'Microsoft.App/jobs@2025-02-02-preview' = if (isJob) {
           image: placeholderImage
           resources: {
             cpu: json(workerCpu)
-            memory: workerMemory
+            memory: effectiveWorkerMemory
           }
           env: workerEnv
         }

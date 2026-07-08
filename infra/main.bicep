@@ -22,8 +22,9 @@ param resourceGroupName string = ''
   'app'
   'jobs'
   'warmjob'
+  'flexjob'
 ])
-@description('Workload to deploy: long-running Container App (app, default), event-driven Container Apps Job (jobs), or warm event-driven Job (warmjob).')
+@description('Workload to deploy: long-running Container App (app, default), event-driven Container Apps Job (jobs), warm event-driven Job (warmjob), or event-driven Job on a Flex workload profile (flexjob).')
 param deploymentMode string = 'app'
 
 // ---- Scaler config (typed as strings for safe azd ${VAR=default} substitution) ------
@@ -66,6 +67,9 @@ param drainSafetyMarginSeconds string = '300'
 
 @description('Warm-Job drain deadline stagger (seconds): deterministic per-execution spread so floor executions do not roll over in lockstep. Default 60.')
 param drainStaggerSeconds string = '60'
+
+@description('Workload profile type used by flexjob mode (workloadProfileType on the managed environment). Default Flex.')
+param flexWorkloadProfileType string = 'Flex'
 
 @description('Name of the storage queue jobs are read from.')
 param queueName string = 'jobs'
@@ -112,6 +116,7 @@ module resources 'resources.bicep' = {
     warmJobMinExecutions: int(warmJobMinExecutions)
     drainSafetyMarginSeconds: int(drainSafetyMarginSeconds)
     drainStaggerSeconds: int(drainStaggerSeconds)
+    flexWorkloadProfileType: flexWorkloadProfileType
     queueName: queueName
     stateTableName: stateTableName
     workerCpu: workerCpu

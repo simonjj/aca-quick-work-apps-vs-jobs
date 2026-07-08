@@ -50,6 +50,9 @@
     "drainStaggerSeconds": {
       "value": "${DRAIN_STAGGER_SECONDS=60}"
     },
+    "flexWorkloadProfileType": {
+      "value": "${FLEX_WORKLOAD_PROFILE_TYPE=Flex}"
+    },
     "queueName": {
       "value": "${QUEUE_NAME=jobs}"
     },
